@@ -104,12 +104,76 @@ def test_unresolved_and_filter() -> None:
     _check("filter keeps only lib nodes", {n["id"] for n in filtered["nodes"]} == {"lib@1", "lib@2"})
 
 
+def test_inline_dependency_registration_order() -> None:
+    """包内 dependencies：内联包先统一登记，解析结果与书写顺序无关。
+
+    packages 已声明 lib@1，包内 dependencies 同时出现无版本引用 "lib" 与
+    带许可证的内联 lib@2 时：无版本引用应进入未解析并提示 name@version 消歧，
+    显式版本仍建立依赖边；调换 dependencies / packages 顺序结果不变。
+    """
+    inline = {"name": "lib", "version": "2", "license": "GPL-3.0"}
+
+    def build(deps, pkg_order):
+        pkgs = {
+            "lib": {"name": "lib", "version": "1", "license": "MIT"},
+            "app": {"name": "app", "version": "1", "license": "MIT",
+                    "dependencies": deps},
+        }
+        return {"name": "repro", "packages": [pkgs[key] for key in pkg_order]}
+
+    signatures = []
+    for deps in (["lib", inline], [inline, "lib"]):
+        for pkg_order in (("lib", "app"), ("app", "lib")):
+            result = analyzer.analyze_manifest(build(deps, pkg_order))
+            signatures.append((
+                sorted((e["source"], e["target"]) for e in result["edges"]),
+                sorted((u["source"], u["reference"], u["reason"]) for u in result["unresolved"]),
+                sorted(n["id"] for n in result["nodes"]),
+                sorted(result["warnings"]),
+            ))
+    _check(
+        "resolution independent of declaration order",
+        all(sig == signatures[0] for sig in signatures),
+        str(signatures),
+    )
+    edges, unresolved, nodes, _ = signatures[0]
+    _check("explicit version edge kept", edges == [("app@1", "lib@2")], str(edges))
+    _check(
+        "version-less ref unresolved with disambiguation hint",
+        unresolved == [("app@1", "lib", "存在多个版本：lib@1, lib@2，请用 name@version 消歧")],
+        str(unresolved),
+    )
+    _check("inline package registered as node", nodes == ["app@1", "lib@1", "lib@2"], str(nodes))
+
+
+def test_inline_dependency_unique_name_still_resolves() -> None:
+    """内联包预登记后，名字唯一的无版本引用仍可自动解析（含跨包引用）。"""
+    manifest = {
+        "packages": [
+            {"name": "app", "version": "1", "license": "MIT",
+             "dependencies": [{"name": "util", "version": "2", "license": "Apache-2.0"}]},
+            {"name": "other", "version": "1", "license": "MIT",
+             "dependencies": ["util"]},
+        ]
+    }
+    result = analyzer.analyze_manifest(manifest)
+    edges = sorted((e["source"], e["target"]) for e in result["edges"])
+    _check(
+        "unique inline name resolves from any package",
+        edges == [("app@1", "util@2"), ("other@1", "util@2")],
+        str(edges),
+    )
+    _check("no unresolved refs", result["unresolved"] == [], str(result["unresolved"]))
+
+
 def main() -> None:
     test_normalization()
     test_matrix_rules()
     test_transitive_and_shortest_path()
     test_cycle_safe()
     test_unresolved_and_filter()
+    test_inline_dependency_registration_order()
+    test_inline_dependency_unique_name_still_resolves()
     print("\nall tests passed.")
 
 

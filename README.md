@@ -205,7 +205,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 - `packages` 声明节点；`dependencies`（包内或顶层，数组或 `名字: 版本` 映射均可）与
   `edges` 声明依赖边，方向为 **使用方 → 被依赖方**，传递约束沿边传播；
-- 只给包名不给版本时，若 `packages` 中该名字唯一则自动解析，多个版本需用 `name@version` 消歧；
+- 包内 `dependencies` 中带 `license` 等字段的内联声明（如
+  `{ "name": "font-pack", "version": "2.0.0", "license": "MIT" }`）会**先统一登记为
+  包节点、再解析该包的依赖引用**，解析结果与 `dependencies` / `packages` 的书写顺序无关；
+- 只给包名不给版本时，若已声明节点中该名字唯一（含内联登记的节点）则自动解析，
+  多个版本需用 `name@version` 消歧，否则进入 `unresolved` 并提示使用完整版本；
 - 无法解析到已声明节点的依赖会进入 `unresolved` 列表并产生告警，不会凭空造节点；
 - 许可证字段支持字符串或数组：`"MIT OR GPL-2.0"` 这类纯 OR 表达式与
   `["MIT", "Apache-2.0"]` 这类多个并列条目都按**多许可证候选**处理（详见

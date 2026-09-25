@@ -200,18 +200,34 @@ def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") ->
         order.append(nid)
         return nid
 
+    def register_inline_ref(ref: object) -> None:
+        """依赖项为内联声明（dict 且带 license / dependencies 字段）时注册为节点。
+
+        与 resolve_ref 分离，便于在解析引用之前统一登记：无版本引用看到的
+        候选版本集合不再依赖 dependencies / packages 数组的书写顺序。
+        """
+        if not isinstance(ref, dict):
+            return
+        if ref.get("license") is None and "dependencies" not in ref:
+            return
+        parsed = split_ref(ref)
+        if not parsed:
+            return
+        ref_name, ref_version = parsed
+        inline = dict(ref)
+        inline.setdefault("name", ref_name)
+        inline.setdefault("version", "" if ref_version == UNVERSIONED else ref_version)
+        register_package(inline)
+
     def resolve_ref(ref: object, source_nid: str) -> Optional[str]:
         parsed = split_ref(ref)
         if not parsed:
             _mark_unresolved(unresolved, unresolved_seen, source_nid, str(ref), "引用无法解析")
             return None
         ref_name, ref_version = parsed
-        # 依赖项内联声明（带 license 等字段）时注册为节点
-        if isinstance(ref, dict) and (ref.get("license") is not None or "dependencies" in ref):
-            inline = dict(ref)
-            inline.setdefault("name", parsed[0])
-            inline.setdefault("version", "" if ref_version == UNVERSIONED else ref_version)
-            register_package(inline)
+        # 顶层 dependencies / edges 中的内联声明在此登记（包内 dependencies
+        # 已在下方统一预登记；register_package 幂等，重复登记无副作用）
+        register_inline_ref(ref)
         if ref_version != UNVERSIONED:
             target = node_id(ref_name, ref_version)
             if target in nodes:
@@ -250,16 +266,21 @@ def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") ->
     elif raw_packages is not None:
         warn("packages 字段不是数组，已忽略。")
 
-    # 2) 包内 dependencies
+    # 2) 包内 dependencies：先登记所有包内可注册的内联包，再统一解析依赖引用。
+    #    否则无版本引用的解析会依赖书写顺序——例如同一包先写 "lib" 后写内联
+    #    lib@2 时把 "lib" 误连到 packages 已声明的 lib@1，调换顺序又变成
+    #    未解析告警，导致同一 manifest 的依赖边不一致。
     if isinstance(raw_packages, list):
         for pkg in raw_packages:
             if not isinstance(pkg, dict):
                 continue
-            source = register_package(pkg)  # 已注册则返回既有 id
-            deps = pkg.get("dependencies")
-            if deps is None:
+            for ref in _iter_refs(pkg.get("dependencies")):
+                register_inline_ref(ref)
+        for pkg in raw_packages:
+            if not isinstance(pkg, dict):
                 continue
-            for ref in _iter_refs(deps):
+            source = register_package(pkg)  # 已注册则返回既有 id
+            for ref in _iter_refs(pkg.get("dependencies")):
                 target = resolve_ref(ref, source or "?")
                 if source and target and source != target:
                     edges.append(
