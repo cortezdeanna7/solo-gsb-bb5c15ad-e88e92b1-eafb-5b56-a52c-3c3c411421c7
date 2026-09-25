@@ -200,6 +200,24 @@ def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") ->
         order.append(nid)
         return nid
 
+    def register_inline_ref(ref: object) -> Optional[str]:
+        """登记依赖项中内联声明的包节点（带 license 或自身带 dependencies 的对象引用）。
+
+        返回登记（或既有）的节点 id；非内联声明（裸字符串/无版本与许可证信息的对象）
+        不登记，返回 None。
+        """
+        if not isinstance(ref, dict) or (
+            ref.get("license") is None and "dependencies" not in ref
+        ):
+            return None
+        parsed = split_ref(ref)
+        if not parsed:
+            return None
+        inline = dict(ref)
+        inline.setdefault("name", parsed[0])
+        inline.setdefault("version", "" if parsed[1] == UNVERSIONED else parsed[1])
+        return register_package(inline)
+
     def resolve_ref(ref: object, source_nid: str) -> Optional[str]:
         parsed = split_ref(ref)
         if not parsed:
@@ -207,11 +225,7 @@ def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") ->
             return None
         ref_name, ref_version = parsed
         # 依赖项内联声明（带 license 等字段）时注册为节点
-        if isinstance(ref, dict) and (ref.get("license") is not None or "dependencies" in ref):
-            inline = dict(ref)
-            inline.setdefault("name", parsed[0])
-            inline.setdefault("version", "" if ref_version == UNVERSIONED else ref_version)
-            register_package(inline)
+        register_inline_ref(ref)
         if ref_version != UNVERSIONED:
             target = node_id(ref_name, ref_version)
             if target in nodes:
@@ -251,6 +265,9 @@ def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") ->
         warn("packages 字段不是数组，已忽略。")
 
     # 2) 包内 dependencies
+    # 每个包先登记其包内可注册的内联包（带 license/依赖的内联声明），再统一解析
+    # 该包的全部依赖引用——避免引用顺序影响解析（如先写无版本 lib、后写内联
+    # lib@2 时，裸 lib 被误连到 packages 中先注册的 lib@1）。
     if isinstance(raw_packages, list):
         for pkg in raw_packages:
             if not isinstance(pkg, dict):
@@ -259,7 +276,10 @@ def analyze_manifest(manifest: Any, manifest_name: str = "uploaded-manifest") ->
             deps = pkg.get("dependencies")
             if deps is None:
                 continue
-            for ref in _iter_refs(deps):
+            refs = list(_iter_refs(deps))
+            for ref in refs:
+                register_inline_ref(ref)
+            for ref in refs:
                 target = resolve_ref(ref, source or "?")
                 if source and target and source != target:
                     edges.append(

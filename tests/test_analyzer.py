@@ -104,12 +104,53 @@ def test_unresolved_and_filter() -> None:
     _check("filter keeps only lib nodes", {n["id"] for n in filtered["nodes"]} == {"lib@1", "lib@2"})
 
 
+def test_inline_package_registration_order_independent() -> None:
+    """同一包内：先登记全部内联包，再统一解析引用，结果应与依赖书写顺序无关。
+
+    裸引用 ``lib`` 在同名多版本（packages 的 lib@1 + 内联 lib@2）时必须进入
+    未解析列表并提示用完整版本消歧；显式的内联 ``lib@2`` 仍建立正确依赖边。
+    """
+
+    def build(deps):
+        return {
+            "packages": [
+                {"name": "app", "version": "1", "license": "GPL-3.0", "dependencies": deps},
+                {"name": "lib", "version": "1", "license": "MIT"},
+            ],
+        }
+
+    bare_first = build(["lib", {"name": "lib", "version": "2", "license": "MIT"}])
+    inline_first = build([{"name": "lib", "version": "2", "license": "MIT"}, "lib"])
+    for tag, manifest in (("bare-first", bare_first), ("inline-first", inline_first)):
+        result = analyzer.analyze_manifest(manifest)
+        edge_set = {(e["source"], e["target"]) for e in result["edges"]}
+        _check(
+            "%s explicit inline edge app@1 -> lib@2" % tag,
+            ("app@1", "lib@2") in edge_set,
+            str(edge_set),
+        )
+        _check(
+            "%s bare lib not wired to lib@1" % tag,
+            ("app@1", "lib@1") not in edge_set,
+            str(edge_set),
+        )
+        unresolved = [(u["reference"], u["reason"]) for u in result["unresolved"]]
+        _check(
+            "%s bare lib unresolved with disambiguation hint" % tag,
+            unresolved == [("lib", "存在多个版本：lib@1, lib@2，请用 name@version 消歧")],
+            str(unresolved),
+        )
+        node_ids = {n["id"] for n in result["nodes"]}
+        _check("%s both lib versions registered" % tag, node_ids == {"app@1", "lib@1", "lib@2"})
+
+
 def main() -> None:
     test_normalization()
     test_matrix_rules()
     test_transitive_and_shortest_path()
     test_cycle_safe()
     test_unresolved_and_filter()
+    test_inline_package_registration_order_independent()
     print("\nall tests passed.")
 
 
